@@ -887,6 +887,14 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
         final int callingUid = Binder.getCallingUid();
 
         mStats.incrementQueryStats(callingUid);
+        // IchthysOS: calendar shield. Resolved before the identity is cleared, while the calling
+        // package is still the app's own.
+        final boolean shielded = isCalendarReadRestricted(uri, callingUid);
+        if (shielded) {
+            // An always-false selection instead of the real query: every query path takes the
+            // selection, and aggregates (_count) answer what an empty calendar answers.
+            selection = TextUtils.isEmpty(selection) ? "0" : "(" + selection + ") AND 0";
+        }
         final long identity = clearCallingIdentityInternal();
         try {
             return queryInternal(uri, projection, selection, selectionArgs, sortOrder, callingUid);
@@ -894,6 +902,50 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
             restoreCallingIdentityInternal(identity);
             mStats.finishOperation(callingUid);
         }
+    }
+
+    /**
+     * IchthysOS: whether {@code callingUid} must see the calendar of a phone with no accounts,
+     * see {@link IchthysShield#FEATURE_CALENDAR}. The time and provider-property URIs carry no
+     * personal data and keep their real answer.
+     */
+    private boolean isCalendarReadRestricted(Uri uri, int callingUid) {
+        final int match = sUriMatcher.match(uri);
+        if (match == TIME || match == PROVIDER_PROPERTIES) {
+            return false;
+        }
+        final String callingPackage;
+        try {
+            callingPackage = getCallingPackage();
+        } catch (SecurityException e) {
+            return false;
+        }
+        return IchthysShield.isRestricted(getContext(), IchthysShield.FEATURE_CALENDAR,
+                callingUid, callingPackage);
+    }
+
+    /**
+     * IchthysOS: whether the current write must be turned into a no-op, see {@link
+     * IchthysShield#FEATURE_CALENDAR_WRITE}. Inside a batch the identity is already cleared, so
+     * the caller recorded by {@link #applyBatch} is used.
+     */
+    private boolean isCalendarWriteRestricted() {
+        final Integer callingUid = mCallingUid.get();
+        if (callingUid == null) {
+            return false;
+        }
+        String callingPackage = null;
+        if (applyingBatch()) {
+            callingPackage = getCachedCallingPackage();
+        } else {
+            try {
+                callingPackage = getCallingPackage();
+            } catch (SecurityException e) {
+                return false;
+            }
+        }
+        return IchthysShield.isRestricted(getContext(), IchthysShield.FEATURE_CALENDAR_WRITE,
+                callingUid, callingPackage);
     }
 
     /**
@@ -2297,6 +2349,10 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
 
         mStats.incrementBatchStats(callingUid);
         try {
+            // IchthysOS: calendar write shield, answered like a stock app-op denial.
+            if (isCalendarWriteRestricted()) {
+                return 0;
+            }
             return super.bulkInsert(uri, values);
         } finally {
             mStats.finishOperation(callingUid);
@@ -2323,6 +2379,10 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
             mCallingUid.set(Binder.getCallingUid());
         }
 
+        // IchthysOS: calendar write shield, answered like a stock app-op denial.
+        if (isCalendarWriteRestricted()) {
+            return rejectInsert(uri, values);
+        }
         return super.insert(uri, values);
     }
 
@@ -2338,6 +2398,10 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
             mCallingUid.set(Binder.getCallingUid());
         }
 
+        // IchthysOS: calendar write shield, answered like a stock app-op denial.
+        if (isCalendarWriteRestricted()) {
+            return 0;
+        }
         return super.update(uri, values, selection, selectionArgs);
     }
 
@@ -2347,6 +2411,10 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
             mCallingUid.set(Binder.getCallingUid());
         }
 
+        // IchthysOS: calendar write shield, answered like a stock app-op denial.
+        if (isCalendarWriteRestricted()) {
+            return 0;
+        }
         return super.delete(uri, selection, selectionArgs);
     }
 

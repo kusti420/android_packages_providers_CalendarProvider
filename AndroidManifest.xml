@@ -43,6 +43,15 @@
     <uses-permission android:name="android.permission.LOG_COMPAT_CHANGE" />
     <uses-permission android:name="android.permission.READ_COMPAT_CHANGE_CONFIG" />
 
+    <!-- IchthysOS: the calendar shield resolves the default calendar app, which keeps real
+         access (see IchthysShield). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.APP_CALENDAR" />
+        </intent>
+    </queries>
+
     <application android:label="@string/calendar_storage"
                  android:allowBackup="false"
                  android:icon="@drawable/app_icon"
