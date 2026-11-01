@@ -31,6 +31,9 @@ import android.telecom.TelecomManager;
 import android.text.TextUtils;
 import android.util.Log;
 
+import com.android.internal.ichthys.guard.GuardEvent;
+import com.android.internal.ichthys.guard.GuardShieldReporter;
+
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -128,7 +131,13 @@ public final class IchthysShield {
             if (isSystemApp(context, uid)) {
                 return false;
             }
-            return !isDefaultApp(context, packageName);
+            final boolean restricted = !isDefaultApp(context, packageName);
+            if (restricted) {
+                // IchthysOS: evidence for Guard ("Calendar shielded for X"); rate-limited there.
+                GuardShieldReporter.note(uid, FEATURE_CALENDAR_WRITE.equals(feature)
+                        ? GuardEvent.SHIELD_CALENDAR_WRITE : GuardEvent.SHIELD_CALENDAR, feature);
+            }
+            return restricted;
         } finally {
             Binder.restoreCallingIdentity(token);
         }
