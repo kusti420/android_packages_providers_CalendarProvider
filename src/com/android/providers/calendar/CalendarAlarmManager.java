@@ -513,7 +513,14 @@ public class CalendarAlarmManager {
         if (Build.IS_DEBUGGABLE) {
             Log.d(TAG, "schedule reminder alarm fired at " + alarmTime);
         }
-        CalendarContract.CalendarAlerts.scheduleAlarm(mContext, mAlarmManager, alarmTime);
+        // IchthysOS: not CalendarContract.CalendarAlerts.scheduleAlarm, whose alarm is an
+        // implicit EVENT_REMINDER broadcast without a permission. This one reaches only our own
+        // receiver, which passes it on to the apps that may read the calendar
+        // (IchthysShield.passOnReminder).
+        final PendingIntent pi = PendingIntent.getBroadcast(mContext, 0,
+                IchthysShield.reminderAlarmIntent(mContext, alarmTime),
+                PendingIntent.FLAG_IMMUTABLE);
+        mAlarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, alarmTime, pi);
     }
 
     public void rescheduleMissedAlarms(ContentResolver cr) {

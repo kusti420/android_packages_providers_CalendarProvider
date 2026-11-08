@@ -44,6 +44,20 @@ public class CalendarProviderBroadcastReceiver extends BroadcastReceiver {
         if (Log.isLoggable(TAG, Log.DEBUG)) {
             Log.d(TAG, "Received intent: " + intent);
         }
+        if (CalendarContract.ACTION_EVENT_REMINDER.equals(action)) {
+            if (intent.getBooleanExtra(IchthysShield.EXTRA_REMINDER_PASSED_ON, false)) {
+                // IchthysOS: our own pass-on (below) of a reminder we already handled.
+                setResultCode(Activity.RESULT_OK);
+                return;
+            }
+            // IchthysOS: the reminder alarm is addressed to us only; pass it on to the apps
+            // that may read the calendar.
+            try {
+                IchthysShield.passOnReminder(context, intent);
+            } catch (RuntimeException e) {
+                Slog.w(TAG, "Failed to pass on the event reminder", e);
+            }
+        }
 
         JobWorkItem jwi = new JobWorkItem(intent);
         JobInfo.Builder alarmJobBuilder = new JobInfo.Builder(CalendarProviderJobService.JOB_ID,

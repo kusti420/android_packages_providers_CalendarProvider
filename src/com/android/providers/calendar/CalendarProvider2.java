@@ -892,8 +892,12 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
         final boolean shielded = isCalendarReadRestricted(uri, callingUid);
         if (shielded) {
             // An always-false selection instead of the real query: every query path takes the
-            // selection, and aggregates (_count) answer what an empty calendar answers.
-            selection = TextUtils.isEmpty(selection) ? "0" : "(" + selection + ") AND 0";
+            // selection, and aggregates (_count) answer what an empty calendar answers. The
+            // caller's own selection is dropped, not combined: "(" + selection + ") AND 0" let a
+            // selection of "1) OR (1" read the real events (verified on device 2026-11-03), and
+            // the query builder is strict only for apps past ENFORCE_STRICT_QUERY_BUILDER.
+            selection = "0";
+            selectionArgs = null;
         }
         final long identity = clearCallingIdentityInternal();
         try {
@@ -918,7 +922,9 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
         try {
             callingPackage = getCallingPackage();
         } catch (SecurityException e) {
-            return false;
+            // A caller naming a package that isn't its own gets the shielded answer, not the
+            // real one: nothing legitimate reaches here with a mismatched attribution.
+            return true;
         }
         return IchthysShield.isRestricted(getContext(), IchthysShield.FEATURE_CALENDAR,
                 callingUid, callingPackage);
@@ -941,7 +947,8 @@ public class CalendarProvider2 extends SQLiteContentProvider implements OnAccoun
             try {
                 callingPackage = getCallingPackage();
             } catch (SecurityException e) {
-                return false;
+                // Same as the read side: a mismatched attribution gets the shielded answer.
+                return true;
             }
         }
         return IchthysShield.isRestricted(getContext(), IchthysShield.FEATURE_CALENDAR_WRITE,

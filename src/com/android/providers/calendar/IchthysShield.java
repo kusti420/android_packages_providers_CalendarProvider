@@ -16,12 +16,14 @@
 
 package com.android.providers.calendar;
 
+import android.Manifest;
+import android.app.BroadcastOptions;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.os.Bundle;
 import android.os.Binder;
 import android.os.Process;
 import android.os.UserHandle;
@@ -34,6 +36,7 @@ import android.util.Log;
 import com.android.internal.ichthys.guard.GuardEvent;
 import com.android.internal.ichthys.guard.GuardShieldReporter;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -52,8 +55,7 @@ import java.util.List;
  * {@link Process#FIRST_APPLICATION_UID}), the provider itself, preinstalled apps
  * ({@link ApplicationInfo#FLAG_SYSTEM} or {@link ApplicationInfo#FLAG_UPDATED_SYSTEM_APP}) and
  * platform-signed apps (the rule {@code com.android.bluetooth.ichthys.RadioPolicy} uses), the
- * default calendar app (the
- * {@link Intent#CATEGORY_APP_CALENDAR} handler, plus the ROM's own calendar app by name), the
+ * ROM's own calendar app by name (preinstalled only), the
  * default dialer, the default SMS app, and any package listed in the per-user
  * {@link Settings.Secure} key {@code ichthys_<feature>_allowed_pkgs} (comma-separated). For the
  * write feature the read allowlist counts too: an app the user gave real calendar access may also
@@ -80,7 +82,9 @@ public final class IchthysShield {
 
     /**
      * Packages that own the calendar data or are the ROM's own calendar app. The user's default
-     * calendar app, dialer and SMS app are resolved at runtime instead.
+     * dialer and SMS app are resolved at runtime instead. There is no calendar role, so a
+     * sideloaded calendar app reads the real calendar only from Guard's allow list (whatever
+     * happens to resolve CATEGORY_APP_CALENDAR is no choice of the user).
      */
     private static final List<String> ALWAYS_ALLOWED_PACKAGES =
             Collections.unmodifiableList(
@@ -210,12 +214,9 @@ public final class IchthysShield {
         }
     }
 
-    /** Whether {@code packageName} is the default calendar app, dialer or SMS app. */
+    /** Whether {@code packageName} is the default dialer or SMS app. */
     private static boolean isDefaultApp(Context context, String packageName) {
         try {
-            if (packageName.equals(getDefaultCalendarPackage(context))) {
-                return true;
-            }
             final TelecomManager telecomManager = context.getSystemService(TelecomManager.class);
             if (telecomManager != null
                     && (packageName.equals(telecomManager.getDefaultDialerPackage())
@@ -233,23 +234,104 @@ public final class IchthysShield {
     }
 
     /**
-     * The package that opens for {@link Intent#CATEGORY_APP_CALENDAR} without asking: the one the
-     * user picked as default, or the only calendar app installed. Null when the choice is open
-     * (the resolver would be shown) or nothing handles it.
+     * Marks an {@link android.provider.CalendarContract#ACTION_EVENT_REMINDER} the provider has
+     * already passed on, so that its own receiver (which matches the same filter) drops it.
      */
-    private static String getDefaultCalendarPackage(Context context) {
-        final Intent intent =
-                Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR);
-        final ResolveInfo info = context.getPackageManager()
-                .resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY);
-        if (info == null) {
+    static final String EXTRA_REMINDER_PASSED_ON =
+            "com.android.providers.calendar.ichthys.REMINDER_PASSED_ON";
+
+    /**
+     * The reminder alarm, addressed to the provider's own receiver only. On stock the alarm
+     * itself is the implicit EVENT_REMINDER broadcast, with no permission: any app learns when
+     * the user's events are due. {@link #passOnReminder} sends it on to the apps that may read
+     * the calendar.
+     */
+    static Intent reminderAlarmIntent(Context context, long alarmTime) {
+        final Intent intent = new Intent(android.provider.CalendarContract.ACTION_EVENT_REMINDER);
+        intent.setData(android.content.ContentUris.withAppendedId(
+                android.provider.CalendarContract.CONTENT_URI, alarmTime));
+        intent.putExtra(android.provider.CalendarContract.CalendarAlerts.ALARM_TIME, alarmTime);
+        intent.setFlags(Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
+        intent.setPackage(context.getPackageName());
+        return intent;
+    }
+
+    /**
+     * IchthysOS: pass a fired reminder alarm on as the stock EVENT_REMINDER broadcast, but only
+     * to holders of READ_CALENDAR and, while the calendar shield is on, only to the apps it lets
+     * read the calendar (the exempt calendar app, Etar, included). Like the SMS broadcast shield
+     * in frameworks/opt/telephony: the manifest receivers are judged one by one, and the system
+     * plus the user's allow list are named for their runtime receivers. Fails open (READ_CALENDAR
+     * only) when the receivers cannot be resolved.
+     */
+    static void passOnReminder(Context context, Intent alarm) {
+        final Intent reminder = new Intent(alarm);
+        reminder.setComponent(null);
+        reminder.setPackage(null);
+        reminder.putExtra(EXTRA_REMINDER_PASSED_ON, true);
+        reminder.addFlags(Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
+        Bundle options = null;
+        final long token = Binder.clearCallingIdentity();
+        try {
+            if (isEnabled(context, FEATURE_CALENDAR)) {
+                final String[] included = reminderRecipients(context, reminder);
+                if (included != null) {
+                    if (included.length == 0) {
+                        return;
+                    }
+                    final BroadcastOptions opts = BroadcastOptions.makeBasic();
+                    opts.setIncludedPackages(included);
+                    options = opts.toBundle();
+                }
+            }
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+        context.sendBroadcast(reminder, Manifest.permission.READ_CALENDAR, options);
+    }
+
+    /** The packages that may get a reminder, or null when they cannot be resolved. */
+    private static String[] reminderRecipients(Context context, Intent reminder) {
+        final String self = context.getPackageName();
+        final List<String> included = new ArrayList<>();
+        // The included packages filter runtime-registered receivers too, and system_server
+        // registers its own as "android".
+        included.add("android");
+        try {
+            final List<ResolveInfo> receivers =
+                    context.getPackageManager().queryBroadcastReceivers(reminder, 0);
+            for (ResolveInfo info : receivers) {
+                if (info.activityInfo == null || info.activityInfo.applicationInfo == null) {
+                    continue;
+                }
+                final String pkg = info.activityInfo.packageName;
+                if (self.equals(pkg) || included.contains(pkg)) {
+                    continue;
+                }
+                if (!isRestricted(context, FEATURE_CALENDAR,
+                        info.activityInfo.applicationInfo.uid, pkg)) {
+                    included.add(pkg);
+                } else {
+                    Log.i(TAG, "Withholding the event reminder from " + pkg);
+                }
+            }
+            // Runtime-registered receivers can't be enumerated: name the allow list. A
+            // "package:picked" entry sees only its picked events, not every reminder.
+            final String allowed = Settings.Secure.getString(
+                    context.getContentResolver(), allowedPackagesSetting(FEATURE_CALENDAR));
+            if (!TextUtils.isEmpty(allowed)) {
+                for (String entry : allowed.split(",")) {
+                    final String pkg = entry.trim();
+                    if (!pkg.isEmpty() && pkg.indexOf(':') < 0 && !self.equals(pkg)
+                            && !included.contains(pkg)) {
+                        included.add(pkg);
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot resolve the event reminder receivers, not filtering", e);
             return null;
         }
-        final ActivityInfo activityInfo = info.activityInfo;
-        if (activityInfo == null || "android".equals(activityInfo.packageName)) {
-            // The ResolverActivity: no default chosen.
-            return null;
-        }
-        return activityInfo.packageName;
+        return included.toArray(new String[0]);
     }
 }
